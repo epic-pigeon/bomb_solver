@@ -15,6 +15,7 @@ fun main(args: Array<String>) {
     if (argsMap["-h"] != null || argsMap["--help"] != null) {
         println("Usage:\n" +
                 "    solve a bomb: java -jar main.jar path/to/bomb\n" +
+                "    solve a bomb with explanations: java -jar main.jar path/to/bomb -e\n" +
                 "    solve a bomb and only print the result: java -jar main.jar path/to/bomb -v 0\n" +
                 "    solve a bomb and write the result into a file: java -jar main.jar path/to/bomb -o path/to/psol.txt\n" +
                 "    test solving bombs: java -jar main.jar --test\n" +
@@ -40,7 +41,7 @@ fun main(args: Array<String>) {
         val txtPath = if (argsMap["-o"] != null) argsMap["-o"]!![0] else null
         val bombFile = File(bombPath)
         val txtFile = if (txtPath != null) File(txtPath) else null
-        val inputs = defuseBomb(bombFile, verbose)
+        val inputs = defuseBomb(bombFile, verbose, argsMap["-e"] != null)
         if (txtFile == null) {
             if (verbose >= 1) {
                 println()
@@ -53,7 +54,7 @@ fun main(args: Array<String>) {
     }
 }
 
-fun defuseBomb(bombFile: File, verbose: Int = 2): List<String> {
+fun defuseBomb(bombFile: File, verbose: Int = 2, explanations: Boolean = false): List<String> {
     val bombFileBytes = bombFile.readBytes()
     val bombSections = readSectionInfo(bombFile)
     val bombPltSection = bombSections.find { it.name == ".plt" }!!
@@ -62,6 +63,7 @@ fun defuseBomb(bombFile: File, verbose: Int = 2): List<String> {
     val bombDataSection = bombSections.find { it.name == ".data" }!!
     val bombSymbols = readSymbolTable(bombFile)
     val inputs = mutableListOf<String>()
+
     fun getStringAtAddr(addr: Int, section: SectionInfo = bombRodataSection): String {
         val endAddr = addr.let {
             var res = it
@@ -77,6 +79,7 @@ fun defuseBomb(bombFile: File, verbose: Int = 2): List<String> {
     for (i in (1..6)) {
         val functionSymbol = bombSymbols.find { it.name == "phase_$i" }!!
         val realAddr = functionSymbol.value.toInt().inSection(bombTextSection)
+        var explanation: String? = null
         val solution = try {
             when (i) {
                 1 -> {
@@ -91,18 +94,22 @@ fun defuseBomb(bombFile: File, verbose: Int = 2): List<String> {
                     val phase1StringAddress = phase1Bytes.slice(5 until 9).toInt()
                     val phase1String = getStringAtAddr(phase1StringAddress)
                     if (verbose >= 1) println("Found string for phase 1: '$phase1String'")
+                    explanation = "This phase simply compares the string you put in with '$phase1String'"
                     phase1String
                 }
                 2 -> {
                     val str = when (bombFileBytes[realAddr + 18]) {
                         0x79.toByte() -> {
-                            "1 2 4 7 11 16" // nums[i] == nums[i-1] + i
+                            explanation = "This phase takes 6 numbers and checks they conform to the following restriction: nums[i] == nums[i-1] + i"
+                            "1 2 4 7 11 16"
                         }
                         0x75.toByte() -> {
-                            "0 1 1 2 3 5" // nums[i] == nums[i-1] + nums[i-2], nums[0] == 0, nums[1] == 1
+                            explanation = "This phase takes 6 numbers and checks they conform to the following restriction: nums[i] == nums[i-1] + nums[i-2], nums[0] == 0, nums[1] == 1"
+                            "0 1 1 2 3 5"
                         }
                         0x74.toByte() -> {
-                            "1 2 4 8 16 32" // nums[i] == nums[i-1] * 2, nums[0] == 1
+                            explanation = "This phase takes 6 numbers and checks they conform to the following restriction: nums[i] == nums[i-1] * 2, nums[0] == 1"
+                            "1 2 4 8 16 32"
                         }
                         else -> throw RuntimeException("Unknown function for phase 2")
                     }
@@ -130,6 +137,7 @@ fun defuseBomb(bombFile: File, verbose: Int = 2): List<String> {
                         }
                         val str = "$firstNum ${charCode.toChar()} $lastNum"
                         if (verbose >= 1) println("Found numbers for phase 3: $str")
+                        explanation = "This phase takes a number, a char and a number. The first number corresponds to the label you want to choose to go to, and then the char and the last number are checked to be equal to the ones the label requires"
                         str
                     } else if (bombFileBytes[realAddr + 4] == 0x48.toByte()) {
                         if (bombFileBytes[lblAddr] != 0xB8.toByte()) throw RuntimeException("Bad switch label contents")
@@ -155,6 +163,7 @@ fun defuseBomb(bombFile: File, verbose: Int = 2): List<String> {
                         }
                         val str = "$firstNum $num"
                         if (verbose >= 1) println("Found numbers for phase 3: $str")
+                        explanation = "This phase takes two numbers and represents a fall-through switch statement with the first number as the switch value that adds/subtracts different numbers from the value it eventually compares to the second number"
                         str
                     } else throw RuntimeException("Unknown phase 3")
                 }
@@ -209,6 +218,7 @@ fun defuseBomb(bombFile: File, verbose: Int = 2): List<String> {
                             val funArg = (0..14).find { func4(it, 0, 14) == targetVal }!!
                             val str = "$funArg $targetVal"
                             if (verbose >= 1) println("Found numbers for phase 4: $str")
+                             explanation = "This phase takes two numbers, passes your first number into func4 and then checks that the second number is equal to the number func4 produces and equal to $targetVal"
                             str
                         }
                         0x0C.toByte() -> {
@@ -219,6 +229,7 @@ fun defuseBomb(bombFile: File, verbose: Int = 2): List<String> {
                             val firstNum = func4Variant3(firstArg, lastNum)
                             val str = "$firstNum $lastNum"
                             if (verbose >= 1) println("Found numbers for phase 4: $str")
+                            explanation = "This phase takes two numbers, passes your first number into func4 and then checks that the second number is equal to the number func4 produces"
                             str
                         }
                         else -> throw RuntimeException("Unknown phase 4")
@@ -251,6 +262,7 @@ fun defuseBomb(bombFile: File, verbose: Int = 2): List<String> {
 
                                 val str = subsetSum(targetSum, 6, array)!!.joinToString("") { (it + 0x40).toChar().toString() }
                                 if (verbose >= 1) println("Found string for phase 5: $str")
+                                explanation = "This phase takes a string of 6 characters and sums elements of its array, indices of which are obtained by and'ing the characters you put in with 0xF"
                                 str
                             }
                             0x83.toByte() -> {
@@ -275,6 +287,7 @@ fun defuseBomb(bombFile: File, verbose: Int = 2): List<String> {
                                     ) + 0x40).toChar().toString()
                                 }.joinToString("")
                                 if (verbose >= 1) println("Found string for phase 5: $str")
+                                explanation = "This phase takes a string of 6 characters and constructs a string from characters from an array, indices into which are obtained by and'ing the characters you put in with 0xF"
                                 str
                             }
                             else -> throw RuntimeException("Unknown phase 5")
@@ -293,6 +306,7 @@ fun defuseBomb(bombFile: File, verbose: Int = 2): List<String> {
                             }
                             val str = "$idx $sum"
                             if (verbose >= 1) println("Found numbers for phase 5: $str")
+                            explanation = "This phase takes two numbers and travels around its array as in idx = arr[idx], starting from the first number you put in, checks the amount of iterations was equal to 15 and the sum equal to the second number you put in"
                             str
                         }
                         else -> throw RuntimeException("Unknown phase 5")
@@ -320,6 +334,7 @@ fun defuseBomb(bombFile: File, verbose: Int = 2): List<String> {
                         else -> throw RuntimeException("Bad phase 6")
                     }
                     if (verbose >= 1) println("Found numbers for phase 6: $str")
+                    explanation = "This phase takes 6 numbers${if (bombFileBytes[realAddr + 1] == 0x56.toByte()) ", inverses them by taking nums[i] = 7 - nums[i]" else ""}, redirects the nodes to follow the sequence of numbers you put in and then checks the values of nodes are in ${if (bombFileBytes[jmpAddr] == 0x7E.toByte()) "increasing" else "decreasing"} order"
                     str
                 }
                 else -> {
@@ -337,6 +352,13 @@ fun defuseBomb(bombFile: File, verbose: Int = 2): List<String> {
             if (tryInputs(bombFile, listOf(*inputs.toTypedArray(), solution))) {
                 if (verbose >= 1) println("  success!")
                 inputs.add(solution)
+                if (explanations) {
+                    if (explanation == null) {
+                        println("No explanation available, sorry")
+                    } else {
+                        println(explanation)
+                    }
+                }
             } else {
                 if (verbose >= 1) println("  failed")
             }
@@ -350,6 +372,7 @@ fun defuseBomb(bombFile: File, verbose: Int = 2): List<String> {
             println()
         }
     }
+
     return inputs
 }
 
